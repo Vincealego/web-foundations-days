@@ -144,9 +144,21 @@ Request paths:
 9. The worker updates the photo's row in the database to "ready" with the thumbnail URL, and clears any stale cached feed entries.
 10. Followers' feeds now show the new photo, with the thumbnail and photo delivered through the CDN.
 
+### If the worker fails
+
+Thumbnail creation can fail (a corrupt image, a crashed worker, storage briefly unavailable), so the pipeline is built to recover:
+
+- **Retries:** if a job fails, it goes back on the queue and is retried a few times, with a short delay that grows each time.
+- **Safe to repeat:** the job always writes the same thumbnail file for a photo, so running it twice does no harm.
+- **Dead-letter queue:** after the last retry, the job moves to a separate "failed jobs" queue and an alert is raised so an engineer can look at it, instead of the job being lost.
+- **Photo stays usable:** the original photo is already saved and the row stays "processing", so the feed can show the full photo or a placeholder until the thumbnail is ready.
+- **Crash recovery:** a worker only removes a job from the queue after it finishes, so if the worker dies halfway, the job reappears and another worker picks it up.
+
 ## 8. Trade-offs
 
 - **Cache speed vs fresh data.** The cache makes feeds fast, but cached feeds can be a few seconds out of date, so a new photo may not appear instantly. We accept this because slightly stale feeds are fine for a photo app.
 - **Read replica lag vs database load.** A replica removes read pressure from the primary, but copying data takes a moment, so a user might briefly not see their own new post. The fix is to read a user's own recent posts from the primary.
 - **Asynchronous thumbnails vs instant results.** The queue and worker make uploads fast and able to survive traffic spikes, but a thumbnail may take a few seconds to appear and the system has more moving parts to monitor.
 - **CDN and object storage cost vs speed.** About 748 TB of new data per year costs a lot to store and serve, but the CDN and cheap object storage are far cheaper and faster than the alternatives, and we can lower the cost by compressing photos or moving old ones to cheaper storage.
+- **Cache invalidation vs freshness.** We can clear a cached feed the moment a new photo arrives, which keeps feeds fresh but costs extra work on every upload, or let cache entries expire after a short time (for example 30 seconds), which is simpler but shows slightly old feeds. Because uploads are rare compared with reads (1 write for every 50 reads), expiring after a short time plus clearing the uploader's own feed is a good balance.
+- **Eventual consistency vs strict consistency.** The read replica, the cache and the background thumbnail job all mean different users may briefly see slightly different data. We accept this because a follower seeing a photo a few seconds late does no harm, and it lets the system handle far more traffic than if every read had to be perfectly up to date.
